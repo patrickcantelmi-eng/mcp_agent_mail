@@ -344,6 +344,34 @@ def _instrument_tool(
                 error_type = type(exc).__name__
                 error_msg = str(exc)
 
+                # EMFILE masquerade detection: aiosqlite (and some other drivers)
+                # rewrap EMFILE ("too many open files") as
+                # sqlite3.OperationalError("unable to open database file"),
+                # stripping the original errno. The OSError handler above
+                # won't fire for these because the exception type isn't
+                # OSError anymore — so we detect the message text and trigger
+                # the same repo-cache cleanup the OSError branch does.
+                # See 2026-04-11 incident: ~1000 leaked .commit.lock fds from
+                # the git mailbox commit path surfaced here as a generic
+                # DATABASE_ERROR with no self-heal.
+                if "unable to open database file" in error_msg.lower():
+                    import errno as _errno  # local import to avoid shadowing
+                    cleared = clear_repo_cache()
+                    wrapped_exc = ToolExecutionError(
+                        "RESOURCE_EXHAUSTED",
+                        f"Too many open files (detected via aiosqlite). Freed {cleared} cached repos. Retry the operation.",
+                        recoverable=True,
+                        data={
+                            "tool": tool_name,
+                            "freed_repos": cleared,
+                            "error_detail": error_msg,
+                            "original_error": error_type,
+                            "suspected_errno": _errno.EMFILE,
+                        },
+                    )
+                    error = wrapped_exc
+                    raise wrapped_exc from exc
+
                 # Try to categorize common error patterns
                 if "database" in error_msg.lower() or "sqlite" in error_msg.lower():
                     error_category = "DATABASE_ERROR"
