@@ -99,6 +99,28 @@ def _maybe_alarm_thread_pressure(
     return now
 
 
+def _sample_thread_pressure(
+    logger: Any,
+    *,
+    now: float,
+    last_alarm: float | None,
+    last_sensor_error: float | None,
+) -> tuple[float | None, float | None]:
+    """Sample thread pressure and report sensor failures without log storms."""
+    try:
+        snapshot = _thread_pressure_snapshot()
+        return _maybe_alarm_thread_pressure(logger, snapshot, now=now, last_alarm=last_alarm), last_sensor_error
+    except Exception as exc:
+        if last_sensor_error is None or now - last_sensor_error >= _THREAD_PRESSURE_ALARM_DEDUP_SECONDS:
+            logger.error(
+                "thread_pressure.sensor_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            last_sensor_error = now
+        return last_alarm, last_sensor_error
+
+
 async def _project_slug_from_id(pid: int | None) -> str | None:
     if pid is None:
         return None
@@ -1432,17 +1454,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             """Alarm on process thread growth with bounded log deduplication."""
             logger = structlog.get_logger("thread_pressure")
             last_alarm: float | None = None
+            last_sensor_error: float | None = None
             while True:
-                try:
-                    snapshot = _thread_pressure_snapshot()
-                    last_alarm = _maybe_alarm_thread_pressure(
+                # A broken logging backend cannot report its own failure, but
+                # the worker must remain alive and retry on the next tick.
+                with contextlib.suppress(Exception):
+                    last_alarm, last_sensor_error = _sample_thread_pressure(
                         logger,
-                        snapshot,
                         now=time.monotonic(),
                         last_alarm=last_alarm,
+                        last_sensor_error=last_sensor_error,
                     )
-                except Exception:
-                    pass
                 await asyncio.sleep(_THREAD_PRESSURE_CHECK_SECONDS)
 
         async def _worker_auto_retire_stale_agents() -> None:

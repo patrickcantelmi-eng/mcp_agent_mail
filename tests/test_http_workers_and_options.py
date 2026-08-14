@@ -41,6 +41,42 @@ def test_thread_pressure_snapshot_and_alarm_are_falsifiable(monkeypatch: pytest.
     assert len(logger.events) == 2
 
 
+def test_thread_pressure_sensor_failure_is_loud_and_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, str]]] = []
+
+        def error(self, event: str, **fields: str) -> None:
+            self.events.append((event, fields))
+
+    def broken_snapshot() -> dict[str, int | bool]:
+        raise RuntimeError("nproc sensor unavailable")
+
+    monkeypatch.setattr(_http, "_thread_pressure_snapshot", broken_snapshot)
+    logger = RecordingLogger()
+    last_alarm, last_sensor_error = _http._sample_thread_pressure(
+        logger, now=1000.0, last_alarm=None, last_sensor_error=None
+    )
+    assert last_alarm is None
+    assert last_sensor_error == 1000.0
+    assert logger.events == [
+        (
+            "thread_pressure.sensor_error",
+            {"error_type": "RuntimeError", "error": "nproc sensor unavailable"},
+        )
+    ]
+
+    _, last_sensor_error = _http._sample_thread_pressure(
+        logger, now=1299.0, last_alarm=None, last_sensor_error=last_sensor_error
+    )
+    assert len(logger.events) == 1
+    _, last_sensor_error = _http._sample_thread_pressure(
+        logger, now=1300.0, last_alarm=None, last_sensor_error=last_sensor_error
+    )
+    assert last_sensor_error == 1300.0
+    assert len(logger.events) == 2
+
+
 @pytest.mark.asyncio
 async def test_thread_pressure_worker_is_started(isolated_env) -> None:
     settings = _config.get_settings()
