@@ -18,6 +18,21 @@ from mcp_agent_mail.db import (
 from mcp_agent_mail.utils import sanitize_agent_name, slugify
 
 
+def test_aiosqlite_driver_exposes_force_terminate_for_cancelled_connections() -> None:
+    import aiosqlite
+    from sqlalchemy.dialects.sqlite.aiosqlite import AsyncAdapt_aiosqlite_connection, SQLiteDialect_aiosqlite
+
+    assert SQLiteDialect_aiosqlite.has_terminate
+    assert callable(getattr(AsyncAdapt_aiosqlite_connection, "terminate", None))
+    assert callable(getattr(aiosqlite.Connection, "stop", None))
+
+
+def test_systemd_unit_bounds_and_recycles_thread_pressure() -> None:
+    unit = (Path(__file__).parents[1] / "deploy/systemd/mcp-agent-mail.service").read_text()
+    assert "TasksMax=512" in unit
+    assert "RuntimeMaxSec=6h" in unit
+
+
 def test_slugify_and_sanitize_edges():
     assert slugify("  Hello World!!  ") == "hello-world"
     assert slugify("") == "project"

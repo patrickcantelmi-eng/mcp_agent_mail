@@ -9,6 +9,10 @@ WorkingDirectory=/opt/mcp-agent-mail
 ExecStart=/usr/bin/uvicorn mcp_agent_mail.http:build_http_app --factory --host 0.0.0.0 --port 8765
 Restart=always
 RestartSec=5
+# Bound a leaked-thread incident below the host's per-user nproc wall and
+# periodically recycle residual SQLite worker state.
+TasksMax=512
+RuntimeMaxSec=6h
 User=appuser
 Group=appuser
 StandardOutput=journal

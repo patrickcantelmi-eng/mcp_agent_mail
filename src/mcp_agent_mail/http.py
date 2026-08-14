@@ -11,6 +11,9 @@ import importlib
 import json
 import logging
 import re
+import resource
+import threading
+import time
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -62,6 +65,38 @@ from .storage import (
     write_agent_profile,
     write_file_reservation_record,
 )
+
+_THREAD_PRESSURE_WARN_THREADS = 256
+_THREAD_PRESSURE_CHECK_SECONDS = 60.0
+_THREAD_PRESSURE_ALARM_DEDUP_SECONDS = 300.0
+
+
+def _thread_pressure_snapshot() -> dict[str, int | bool]:
+    """Return process thread usage alongside the host's per-user nproc limit."""
+    current_threads = threading.active_count()
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NPROC)
+    return {
+        "current_threads": current_threads,
+        "soft_nproc_limit": -1 if soft_limit == resource.RLIM_INFINITY else int(soft_limit),
+        "hard_nproc_limit": -1 if hard_limit == resource.RLIM_INFINITY else int(hard_limit),
+        "alarm": current_threads >= _THREAD_PRESSURE_WARN_THREADS,
+    }
+
+
+def _maybe_alarm_thread_pressure(
+    logger: Any,
+    snapshot: dict[str, int | bool],
+    *,
+    now: float,
+    last_alarm: float | None,
+) -> float | None:
+    """Emit a bounded-dedup alarm and return the updated alarm timestamp."""
+    if not snapshot["alarm"]:
+        return last_alarm
+    if last_alarm is not None and now - last_alarm < _THREAD_PRESSURE_ALARM_DEDUP_SECONDS:
+        return last_alarm
+    logger.error("thread_pressure.alarm", **snapshot)
+    return now
 
 
 async def _project_slug_from_id(pid: int | None) -> str | None:
@@ -1393,6 +1428,23 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     pass
                 await asyncio.sleep(30)
 
+        async def _worker_thread_pressure() -> None:
+            """Alarm on process thread growth with bounded log deduplication."""
+            logger = structlog.get_logger("thread_pressure")
+            last_alarm: float | None = None
+            while True:
+                try:
+                    snapshot = _thread_pressure_snapshot()
+                    last_alarm = _maybe_alarm_thread_pressure(
+                        logger,
+                        snapshot,
+                        now=time.monotonic(),
+                        last_alarm=last_alarm,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(_THREAD_PRESSURE_CHECK_SECONDS)
+
         async def _worker_auto_retire_stale_agents() -> None:
             log = structlog.get_logger("maintenance.auto_retire")
             interval = max(60, int(settings.auto_retire_stale_agents_interval_seconds))
@@ -1419,6 +1471,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         tasks = []
         # FD health monitor always runs - it's critical for preventing EMFILE cascades
         tasks.append(asyncio.create_task(_worker_fd_health()))
+        tasks.append(asyncio.create_task(_worker_thread_pressure()))
         if settings.file_reservations_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
         if settings.ack_ttl_enabled:
