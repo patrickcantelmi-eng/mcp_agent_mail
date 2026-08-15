@@ -7,9 +7,47 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mcp_agent_mail import config as _config
+from mcp_agent_mail import config as _config, http as _http
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.http import build_http_app
+
+
+def test_thread_pressure_snapshot_and_alarm_are_falsifiable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, int | bool]]] = []
+
+        def error(self, event: str, **fields: int | bool) -> None:
+            self.events.append((event, fields))
+
+    monkeypatch.setattr(_http.resource, "getrlimit", lambda _kind: (2048, 4096))
+    monkeypatch.setattr(_http.threading, "active_count", lambda: 255)
+    assert _http._thread_pressure_snapshot() == {
+        "current_threads": 255,
+        "soft_nproc_limit": 2048,
+        "hard_nproc_limit": 4096,
+        "alarm": False,
+    }
+
+    monkeypatch.setattr(_http.threading, "active_count", lambda: 256)
+    snapshot = _http._thread_pressure_snapshot()
+    logger = RecordingLogger()
+    last_alarm = _http._maybe_alarm_thread_pressure(logger, snapshot, now=1000.0, last_alarm=None)
+    assert last_alarm == 1000.0
+    assert logger.events == [("thread_pressure.alarm", snapshot)]
+    assert _http._maybe_alarm_thread_pressure(logger, snapshot, now=1299.0, last_alarm=last_alarm) == 1000.0
+    assert len(logger.events) == 1
+    assert _http._maybe_alarm_thread_pressure(logger, snapshot, now=1300.0, last_alarm=last_alarm) == 1300.0
+    assert len(logger.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_thread_pressure_worker_is_started(isolated_env) -> None:
+    settings = _config.get_settings()
+    app = build_http_app(settings, build_mcp_server())
+    async with app.router.lifespan_context(app):
+        worker_names = {task.get_coro().__name__ for task in app.state._background_tasks}
+        assert "_worker_thread_pressure" in worker_names
 
 
 def _rpc(method: str, params: dict) -> dict[str, Any]:
@@ -87,5 +125,4 @@ async def test_http_request_logging_and_cors_headers(isolated_env, monkeypatch):
         assert r0.status_code in (200, 204)
         r = await client.post(settings.http.path, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r.status_code in (200, 401, 403)
-
 

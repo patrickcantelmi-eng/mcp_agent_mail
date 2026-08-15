@@ -7,6 +7,15 @@ from mcp_agent_mail.db import ensure_schema, get_engine, reset_database_state
 from mcp_agent_mail.utils import sanitize_agent_name, slugify
 
 
+def test_aiosqlite_driver_exposes_force_terminate_for_cancelled_connections() -> None:
+    import aiosqlite
+    from sqlalchemy.dialects.sqlite.aiosqlite import AsyncAdapt_aiosqlite_connection, SQLiteDialect_aiosqlite
+
+    assert SQLiteDialect_aiosqlite.has_terminate
+    assert callable(getattr(AsyncAdapt_aiosqlite_connection, "terminate", None))
+    assert callable(getattr(aiosqlite.Connection, "stop", None))
+
+
 def test_slugify_and_sanitize_edges():
     assert slugify("  Hello World!!  ") == "hello-world"
     assert slugify("") == "project"
@@ -30,5 +39,3 @@ def test_db_engine_reset_and_reinit(isolated_env):
     _ = get_engine()
     # Ensure schema executes without error
     asyncio.run(ensure_schema())
-
-
