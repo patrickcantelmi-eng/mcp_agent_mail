@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ def _run_probe(
     request_exit: int = 0,
     sleep_seconds: int = 0,
     timeout_seconds: int = 5,
+    url: str | None = None,
     subprocess_timeout: float = 8.0,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], float]:
     fake_bin, args_file = _fake_curl(tmp_path)
@@ -53,6 +55,8 @@ def _run_probe(
             "PROBE_TEST_SLEEP_SECONDS": str(sleep_seconds),
         }
     )
+    if url is not None:
+        env["MCP_AGENT_MAIL_LIVENESS_URL"] = url
     started = time.monotonic()
     result = subprocess.run(
         [str(PROBE)],
@@ -139,16 +143,70 @@ def test_probe_refuses_unbounded_or_non_loopback_configuration(tmp_path: Path) -
     assert not args_file.exists()
 
 
+def test_probe_rejects_userinfo_query_fragment_and_invalid_ports_before_curl(tmp_path: Path) -> None:
+    invalid_urls = [
+        "http://127.0.0.1:8765@evil.example:80/health/liveness",
+        "http://localhost:8765@evil.example:80/health/liveness",
+        "http://[::1]:8765@evil.example:80/health/liveness",
+        "http://127.0.0.1:8765/health/liveness?target=evil",
+        "http://localhost:8765/health/liveness#fragment",
+        "http://127.0.0.1:0/health/liveness",
+        "http://127.0.0.1:65536/health/liveness",
+        "http://127.0.0.1:not-a-port/health/liveness",
+    ]
+
+    for index, url in enumerate(invalid_urls):
+        case_dir = tmp_path / str(index)
+        result, args, _elapsed = _run_probe(case_dir, url=url)
+        assert result.returncode == 2, url
+        assert "reason=invalid_loopback_url" in result.stderr, url
+        assert args == [], url
+
+
+def test_probe_accepts_only_numeric_loopback_port_boundaries(tmp_path: Path) -> None:
+    valid_urls = [
+        "http://127.0.0.1:1/health/liveness",
+        "http://localhost:65535/health/liveness",
+        "http://[::1]:8765/health/liveness",
+    ]
+
+    for index, url in enumerate(valid_urls):
+        result, args, _elapsed = _run_probe(tmp_path / str(index), url=url)
+        assert result.returncode == 0, url
+        assert args[-1] == url
+
+
 def test_systemd_timer_runs_the_out_of_process_probe_with_bounded_failure_visibility() -> None:
     service = PROBE_SERVICE.read_text(encoding="utf-8")
     timer = PROBE_TIMER.read_text(encoding="utf-8")
 
     assert "ExecStart=/opt/mcp-agent-mail/scripts/probe_agent_mail_liveness.sh" in service
+    assert [line for line in service.splitlines() if line.startswith("User=")] == ["User=appuser"]
+    assert [line for line in service.splitlines() if line.startswith("Group=")] == ["Group=appuser"]
     assert "MCP_AGENT_MAIL_LIVENESS_TIMEOUT_SECONDS=5" in service
-    assert "TimeoutStartSec=10s" in service
+    assert "TimeoutStartSec=35s" in service
     assert "StandardError=journal" in service
     assert "SyslogIdentifier=mcp-agent-mail-liveness-probe" in service
     assert "OnBootSec=1min" in timer
     assert "OnUnitActiveSec=1min" in timer
     assert "Persistent=true" in timer
     assert "Unit=mcp-agent-mail-liveness-probe.service" in timer
+
+
+def test_service_deadline_exceeds_every_timeout_the_probe_accepts(tmp_path: Path) -> None:
+    probe = PROBE.read_text(encoding="utf-8")
+    service = PROBE_SERVICE.read_text(encoding="utf-8")
+    accepted_max_match = re.search(r'^readonly MAX_TIMEOUT_SECONDS="([0-9]+)"$', probe, re.MULTILINE)
+    service_ceiling_match = re.search(r"^TimeoutStartSec=([0-9]+)s$", service, re.MULTILINE)
+
+    assert accepted_max_match is not None
+    assert service_ceiling_match is not None
+    accepted_max = int(accepted_max_match.group(1))
+    service_ceiling = int(service_ceiling_match.group(1))
+    assert accepted_max < service_ceiling
+
+    accepted, _args, _elapsed = _run_probe(
+        tmp_path,
+        timeout_seconds=accepted_max,
+    )
+    assert accepted.returncode == 0

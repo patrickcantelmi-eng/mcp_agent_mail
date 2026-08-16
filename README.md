@@ -2243,10 +2243,12 @@ sudo systemctl enable --now mcp-agent-mail-liveness-probe.timer
 sudo systemctl list-timers mcp-agent-mail-liveness-probe.timer
 ```
 
-The default request deadline is five seconds and the timer runs once per minute. Override the
-loopback URL or deadline in `/etc/mcp-agent-mail-liveness.env`; invalid deadlines, non-loopback
-URLs, request failures, timeouts, and unexpected response bodies all fail the oneshot unit and
-write the stable alarm marker to its journal. Inspect it with
+The default request deadline is five seconds and the timer runs once per minute under the same
+unprivileged `appuser`/`appuser` identity as the HTTP service. Override the loopback URL or the
+1–30 second deadline in `/etc/mcp-agent-mail-liveness.env`; the oneshot's 35-second service
+ceiling always leaves time for the probe to emit its stable alarm marker. Invalid deadlines,
+non-loopback URLs, request failures, timeouts, and unexpected response bodies all fail the
+oneshot unit and write the marker to its journal. Inspect it with
 `journalctl -u mcp-agent-mail-liveness-probe.service`.
 
 Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.

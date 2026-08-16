@@ -7,9 +7,11 @@
 set -uo pipefail
 
 readonly PROBE_ID="agent_mail_liveness"
+readonly MAX_TIMEOUT_SECONDS="30"
 readonly TIMEOUT_SECONDS="${MCP_AGENT_MAIL_LIVENESS_TIMEOUT_SECONDS:-5}"
 readonly PROBE_URL="${MCP_AGENT_MAIL_LIVENESS_URL:-http://127.0.0.1:8765/health/liveness}"
 readonly EXPECTED_BODY='{"status":"alive"}'
+readonly LOOPBACK_URL_PATTERN='^http://(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})/health/liveness$'
 
 alarm() {
   local reason="$1"
@@ -18,18 +20,25 @@ alarm() {
     "$PROBE_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$TIMEOUT_SECONDS" "$request_exit" >&2
 }
 
-if [[ ! "$TIMEOUT_SECONDS" =~ ^([1-9]|[12][0-9]|30)$ ]]; then
+if [[ ! "$TIMEOUT_SECONDS" =~ ^[0-9]{1,2}$ ]]; then
+  alarm "invalid_timeout"
+  exit 2
+fi
+timeout_value=$((10#$TIMEOUT_SECONDS))
+if (( timeout_value < 1 || timeout_value > MAX_TIMEOUT_SECONDS )); then
   alarm "invalid_timeout"
   exit 2
 fi
 
-case "$PROBE_URL" in
-  http://127.0.0.1:*/health/liveness | http://localhost:*/health/liveness | http://\[::1\]:*/health/liveness) ;;
-  *)
-    alarm "invalid_loopback_url"
-    exit 2
-    ;;
-esac
+if [[ ! "$PROBE_URL" =~ $LOOPBACK_URL_PATTERN ]]; then
+  alarm "invalid_loopback_url"
+  exit 2
+fi
+port_value=$((10#${BASH_REMATCH[2]}))
+if (( port_value < 1 || port_value > 65535 )); then
+  alarm "invalid_loopback_url"
+  exit 2
+fi
 
 curl_bin="$(command -v curl 2>/dev/null || true)"
 timeout_bin="$(command -v timeout 2>/dev/null || true)"
