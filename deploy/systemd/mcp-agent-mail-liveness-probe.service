@@ -1,0 +1,19 @@
+[Unit]
+Description=Out-of-process MCP Agent Mail liveness probe
+After=network.target mcp-agent-mail.service
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/bin:/bin
+Environment=MCP_AGENT_MAIL_LIVENESS_URL=http://127.0.0.1:8765/health/liveness
+Environment=MCP_AGENT_MAIL_LIVENESS_TIMEOUT_SECONDS=5
+EnvironmentFile=-/etc/mcp-agent-mail-liveness.env
+ExecStart=/opt/mcp-agent-mail/scripts/probe_agent_mail_liveness.sh
+TimeoutStartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-agent-mail-liveness-probe

@@ -2231,6 +2231,24 @@ sudo systemctl start mcp-agent-mail
 sudo systemctl status mcp-agent-mail
 ```
 
+Install the separate liveness timer as well. It probes `/health/liveness` from outside the
+server process, so it still fails and emits `agent_mail_liveness.alarm` in journald when the
+server event loop is blocked and cannot run its in-process monitors:
+
+```bash
+sudo install -m 0644 deploy/systemd/mcp-agent-mail-liveness-probe.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/mcp-agent-mail-liveness-probe.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mcp-agent-mail-liveness-probe.timer
+sudo systemctl list-timers mcp-agent-mail-liveness-probe.timer
+```
+
+The default request deadline is five seconds and the timer runs once per minute. Override the
+loopback URL or deadline in `/etc/mcp-agent-mail-liveness.env`; invalid deadlines, non-loopback
+URLs, request failures, timeouts, and unexpected response bodies all fail the oneshot unit and
+write the stable alarm marker to its journal. Inspect it with
+`journalctl -u mcp-agent-mail-liveness-probe.service`.
+
 Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.
 
 See `deploy/gunicorn.conf.py` for a starter configuration. For project direction and planned areas, read `project_idea_and_guide.md`.
