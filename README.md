@@ -2236,20 +2236,23 @@ server process, so it still fails and emits `agent_mail_liveness.alarm` in journ
 server event loop is blocked and cannot run its in-process monitors:
 
 ```bash
-sudo install -m 0644 deploy/systemd/mcp-agent-mail-liveness-probe.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mcp-agent-mail-liveness-probe.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mcp-agent-mail-liveness-probe.timer
-sudo systemctl list-timers mcp-agent-mail-liveness-probe.timer
+install -Dm 0755 scripts/probe_agent_mail_liveness.sh /home/ubuntu/mcp_agent_mail/scripts/probe_agent_mail_liveness.sh
+install -Dm 0644 deploy/systemd/mcp-agent-mail-liveness-probe.service "$HOME/.config/systemd/user/mcp-agent-mail-liveness-probe.service"
+install -Dm 0644 deploy/systemd/mcp-agent-mail-liveness-probe.timer "$HOME/.config/systemd/user/mcp-agent-mail-liveness-probe.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now mcp-agent-mail-liveness-probe.timer
+systemctl --user list-timers mcp-agent-mail-liveness-probe.timer
 ```
 
 The default request deadline is five seconds and the timer runs once per minute under the same
-unprivileged `appuser`/`appuser` identity as the HTTP service. Override the loopback URL or the
-1–30 second deadline in `/etc/mcp-agent-mail-liveness.env`; the oneshot's 35-second service
-ceiling always leaves time for the probe to emit its stable alarm marker. Invalid deadlines,
-non-loopback URLs, request failures, timeouts, and unexpected response bodies all fail the
-oneshot unit and write the marker to its journal. Inspect it with
-`journalctl -u mcp-agent-mail-liveness-probe.service`.
+unprivileged `ubuntu` identity as the live user-scoped HTTP service. User-level systemd supplies
+that non-root identity, so the probe unit deliberately has no `User=` or `Group=` directive.
+Override the loopback URL or the 1–30 second deadline in
+`$HOME/.config/mcp-agent-mail/liveness.env`; the oneshot's 35-second service ceiling always
+leaves time for the probe to emit its stable alarm marker. Invalid deadlines, non-loopback URLs,
+request failures, timeouts, and unexpected response bodies all fail the oneshot unit and write
+the marker to its journal. Inspect it with
+`journalctl --user -u mcp-agent-mail-liveness-probe.service`.
 
 Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.
 

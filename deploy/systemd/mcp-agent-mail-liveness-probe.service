@@ -4,13 +4,14 @@ After=network.target mcp-agent-mail.service
 
 [Service]
 Type=oneshot
-User=appuser
-Group=appuser
+# Live-host profile: install this unit in ubuntu's user manager. User=/Group=
+# are intentionally absent because a user-scoped manager already guarantees
+# the probe runs as its owning non-root account, matching mcp-agent-mail.service.
 Environment=PATH=/usr/bin:/bin
 Environment=MCP_AGENT_MAIL_LIVENESS_URL=http://127.0.0.1:8765/health/liveness
 Environment=MCP_AGENT_MAIL_LIVENESS_TIMEOUT_SECONDS=5
-EnvironmentFile=-/etc/mcp-agent-mail-liveness.env
-ExecStart=/opt/mcp-agent-mail/scripts/probe_agent_mail_liveness.sh
+EnvironmentFile=-%h/.config/mcp-agent-mail/liveness.env
+ExecStart=/home/ubuntu/mcp_agent_mail/scripts/probe_agent_mail_liveness.sh
 TimeoutStartSec=35s
 NoNewPrivileges=true
 PrivateTmp=true

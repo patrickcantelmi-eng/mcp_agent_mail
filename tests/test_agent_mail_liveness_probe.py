@@ -180,9 +180,11 @@ def test_systemd_timer_runs_the_out_of_process_probe_with_bounded_failure_visibi
     service = PROBE_SERVICE.read_text(encoding="utf-8")
     timer = PROBE_TIMER.read_text(encoding="utf-8")
 
-    assert "ExecStart=/opt/mcp-agent-mail/scripts/probe_agent_mail_liveness.sh" in service
-    assert [line for line in service.splitlines() if line.startswith("User=")] == ["User=appuser"]
-    assert [line for line in service.splitlines() if line.startswith("Group=")] == ["Group=appuser"]
+    assert "ExecStart=/home/ubuntu/mcp_agent_mail/scripts/probe_agent_mail_liveness.sh" in service
+    assert [line for line in service.splitlines() if line.startswith("User=")] == []
+    assert [line for line in service.splitlines() if line.startswith("Group=")] == []
+    assert "install this unit in ubuntu's user manager" in service
+    assert "EnvironmentFile=-%h/.config/mcp-agent-mail/liveness.env" in service
     assert "MCP_AGENT_MAIL_LIVENESS_TIMEOUT_SECONDS=5" in service
     assert "TimeoutStartSec=35s" in service
     assert "StandardError=journal" in service
@@ -191,6 +193,24 @@ def test_systemd_timer_runs_the_out_of_process_probe_with_bounded_failure_visibi
     assert "OnUnitActiveSec=1min" in timer
     assert "Persistent=true" in timer
     assert "Unit=mcp-agent-mail-liveness-probe.service" in timer
+
+
+def test_readme_installs_the_probe_into_the_live_user_service_profile() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    deployment = readme.split("Install the separate liveness timer as well.", 1)[1].split(
+        "Optional (non-journald log rotation)", 1
+    )[0]
+
+    assert (
+        "install -Dm 0755 scripts/probe_agent_mail_liveness.sh "
+        "/home/ubuntu/mcp_agent_mail/scripts/probe_agent_mail_liveness.sh"
+    ) in deployment
+    assert deployment.count('"$HOME/.config/systemd/user/mcp-agent-mail-liveness-probe.') == 2
+    assert "systemctl --user daemon-reload" in deployment
+    assert "systemctl --user enable --now mcp-agent-mail-liveness-probe.timer" in deployment
+    assert "journalctl --user -u mcp-agent-mail-liveness-probe.service" in deployment
+    assert "sudo systemctl" not in deployment
+    assert "/etc/systemd/system/mcp-agent-mail-liveness-probe" not in deployment
 
 
 def test_service_deadline_exceeds_every_timeout_the_probe_accepts(tmp_path: Path) -> None:
