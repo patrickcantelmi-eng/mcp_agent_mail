@@ -220,9 +220,24 @@ async def ensure_schema(settings: Settings | None = None) -> None:
             # Pure SQLModel: create tables from metadata
             # (WAL mode is set automatically via event listener in _build_engine)
             await conn.run_sync(SQLModel.metadata.create_all)
+            # Additive column migrations for pre-existing databases
+            # (create_all only creates missing tables, never missing columns)
+            await conn.run_sync(_apply_additive_migrations)
             # Setup FTS and custom indexes
             await conn.run_sync(_setup_fts)
         _schema_ready = True
+
+
+def _apply_additive_migrations(connection: Any) -> None:
+    """Idempotently add columns introduced after a table already exists."""
+    if connection.dialect.name != "sqlite":
+        return
+    rows = connection.exec_driver_sql("PRAGMA table_info(messages)").fetchall()
+    columns = {row[1] for row in rows}
+    if rows and "sender_attested" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE messages ADD COLUMN sender_attested BOOLEAN NOT NULL DEFAULT 0"
+        )
 
 
 def reset_database_state() -> None:

@@ -36,6 +36,7 @@ from .app import (
     refresh_project_sibling_suggestions,
     update_project_sibling_status,
 )
+from .authz import Principal, TokenRegistry, evaluate_identity_claims, hash_token
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
@@ -180,27 +181,102 @@ def _configure_logging(settings: Settings) -> None:
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI, token: str, allow_localhost: bool = False) -> None:
+    """Fleet authentication and caller-identity binding (bd fba-restock-planner-xlhjj).
+
+    Resolves each request's bearer token to a Principal (per-agent, unclaimed,
+    shared, or localhost-dev) and refuses tools/call requests whose
+    caller-identity arguments (sender_name/agent_name/...) do not match the
+    credential's bound agent. The resolved Principal is attached as
+    ``request.state.mail_principal`` for the tool layer (attestation stamping,
+    register_agent token claiming).
+    """
+
+    def __init__(self, app: FastAPI, settings: Settings) -> None:
         super().__init__(app)
-        self._token = token
-        self._allow_localhost = allow_localhost
+        self.settings = settings
+        shared: set[str] = set()
+        if settings.http.bearer_token:
+            shared.add(settings.http.bearer_token)
+        shared.update(t for t in (settings.http.bearer_tokens or []) if t)
+        self._shared_tokens = shared
+        self._allow_localhost = bool(settings.http.allow_localhost_unauthenticated)
+        self._strict = settings.http.sender_binding == "strict"
+        self._jwt_enabled = bool(getattr(settings.http, "jwt_enabled", False))
+        self._registry = TokenRegistry(Path(settings.http.agent_tokens_path).expanduser())
+
+    def _resolve_principal(self, request: Request) -> Principal | None:
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+        if token:
+            sha = hash_token(token)
+            entry = self._registry.lookup_sha(sha)
+            if entry is not None and not entry.get("revoked"):
+                bound = entry.get("agent_name")
+                if isinstance(bound, str) and bound:
+                    return Principal(kind="agent", agent_name=bound, token_sha256=sha)
+                return Principal(kind="unclaimed", token_sha256=sha)
+            if token in self._shared_tokens:
+                return Principal(kind="shared", token_sha256=sha)
+            if self._jwt_enabled:
+                # Not a fleet credential: defer to the JWT middleware, which
+                # validates (and rejects) the token itself.
+                return Principal(kind="jwt", token_sha256=sha)
+            return None  # unknown or revoked token -> 401
+        try:
+            client_host = request.client.host if request.client else ""
+        except Exception:
+            client_host = ""
+        if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
+            return Principal(kind="localhost")
+        return None
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
             return await call_next(request)
-        # Allow localhost without Authorization when enabled
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
-            return await call_next(request)
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {self._token}":
+        principal = self._resolve_principal(request)
+        if principal is None:
             return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
+
+        # Bind caller-identity arguments of tools/call requests to the credential.
+        if request.method.upper() == "POST":
+            try:
+                body_bytes = await request.body()
+
+                async def _receive() -> dict:
+                    return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+                cast(Any, request)._receive = _receive
+            except Exception:
+                body_bytes = b""
+            tool_name, arguments = _parse_tools_call(body_bytes)
+            if tool_name is not None:
+                refusal = evaluate_identity_claims(
+                    principal, tool_name, arguments, strict=self._strict
+                )
+                if refusal is not None:
+                    return JSONResponse(
+                        {"detail": refusal, "error": "sender_binding_refused"},
+                        status_code=status.HTTP_403_FORBIDDEN,
+                    )
+        request.state.mail_principal = principal
         return await call_next(request)
+
+
+def _parse_tools_call(body_bytes: bytes) -> tuple[str | None, dict[str, Any]]:
+    """Return (tool_name, arguments) for a JSON-RPC tools/call body, else (None, {})."""
+    if not body_bytes:
+        return None, {}
+    with contextlib.suppress(Exception):
+        payload = json.loads(body_bytes)
+        if isinstance(payload, dict) and str(payload.get("method", "")) == "tools/call":
+            params = payload.get("params") or {}
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if isinstance(tool_name, str) and isinstance(arguments, dict):
+                return tool_name, arguments
+    return None, {}
 
 
 class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
@@ -376,8 +452,12 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
 
         kind, tool_name = self._classify_request(request.url.path, request.method, body_bytes)
 
-        # JWT auth (if enabled)
-        if self._jwt_enabled:
+        # JWT auth (if enabled). Requests already authenticated by the fleet
+        # bearer layer (registry-bound, unclaimed, or shared tokens) are not
+        # re-validated as JWTs — those credentials are not JWTs.
+        _fleet_principal = getattr(request.state, "mail_principal", None)
+        _fleet_authenticated = getattr(_fleet_principal, "kind", None) in {"agent", "unclaimed", "shared"}
+        if self._jwt_enabled and not _fleet_authenticated:
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
@@ -904,15 +984,19 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         or getattr(settings.http, "rbac_enabled", True)
     ):
         fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)  # type: ignore[arg-type]
-    # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
-    if settings.http.bearer_token:
+    # Fleet auth: engaged whenever any token source is configured (shared tokens,
+    # a per-agent token registry, or strict binding). With none of those present
+    # the historical open dev default is preserved.
+    _registry_path = Path(settings.http.agent_tokens_path).expanduser()
+    if (
+        settings.http.bearer_token
+        or settings.http.bearer_tokens
+        or settings.http.sender_binding == "strict"
+        or _registry_path.exists()
+    ):
         from typing import Any as _Any, cast as _cast  # local type-only import
         app_any = _cast(_Any, fastapi_app)
-        app_any.add_middleware(
-            BearerAuthMiddleware,
-            token=settings.http.bearer_token,
-            allow_localhost=bool(getattr(settings.http, "allow_localhost_unauthenticated", False)),
-        )
+        app_any.add_middleware(BearerAuthMiddleware, settings=settings)
 
     # Optional CORS
     if settings.cors.enabled:

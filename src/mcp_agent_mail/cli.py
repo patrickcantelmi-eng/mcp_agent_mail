@@ -98,6 +98,63 @@ products_app = typer.Typer(help="Product Bus: manage products and links")
 app.add_typer(products_app, name="products")
 docs_app = typer.Typer(help="Documentation helpers for agent onboarding")
 app.add_typer(docs_app, name="docs")
+tokens_app = typer.Typer(help="Per-agent bearer token registry (fleet auth; bd fba-restock-planner-xlhjj)")
+app.add_typer(tokens_app, name="tokens")
+
+
+def _token_registry(registry: Optional[Path] = None):
+    from .authz import TokenRegistry
+    from .config import get_settings as _get_settings
+
+    path = registry or Path(_get_settings().http.agent_tokens_path).expanduser()
+    return TokenRegistry(Path(path))
+
+
+@tokens_app.command("mint")
+def tokens_mint(
+    name: Annotated[Optional[str], typer.Option("--name", help="Bind the token to this agent name now; omit for a launcher token claimed at register_agent")] = None,
+    note: Annotated[str, typer.Option("--note", help="Free-form note stored with the registry entry")] = "",
+    registry: Annotated[Optional[Path], typer.Option("--registry", help="Registry path override (default: MAIL_AGENT_TOKENS_PATH)")] = None,
+) -> None:
+    """Mint a per-agent bearer token. The plaintext is printed ONCE and never stored."""
+    reg = _token_registry(registry)
+    token, sha = reg.mint(agent_name=name, note=note)
+    typer.echo(f"token: {token}")
+    typer.echo(f"sha256: {sha}")
+    typer.echo(f"bound_to: {name or '(unclaimed — first register_agent claims it)'}")
+    typer.echo(f"registry: {reg.path}")
+
+
+@tokens_app.command("list")
+def tokens_list(
+    registry: Annotated[Optional[Path], typer.Option("--registry", help="Registry path override")] = None,
+) -> None:
+    """List registry entries (sha prefix + binding; plaintext tokens are not stored)."""
+    reg = _token_registry(registry)
+    entries = reg.entries()
+    if not entries:
+        typer.echo(f"registry {reg.path}: no entries")
+        return
+    for sha, entry in sorted(entries.items(), key=lambda kv: str(kv[1].get("created_ts") or "")):
+        status = "REVOKED" if entry.get("revoked") else ("bound" if entry.get("agent_name") else "unclaimed")
+        typer.echo(
+            f"{sha[:12]}…  {status:<9}  agent={entry.get('agent_name') or '-':<20} "
+            f"created={entry.get('created_ts') or '-'}  note={entry.get('note') or ''}"
+        )
+
+
+@tokens_app.command("revoke")
+def tokens_revoke(
+    sha_prefix: Annotated[Optional[str], typer.Option("--sha-prefix", help="Revoke entries whose sha256 starts with this prefix")] = None,
+    name: Annotated[Optional[str], typer.Option("--name", help="Revoke entries bound to this agent name")] = None,
+    registry: Annotated[Optional[Path], typer.Option("--registry", help="Registry path override")] = None,
+) -> None:
+    """Revoke token(s); revoked tokens stop authenticating immediately (fail closed)."""
+    if not sha_prefix and not name:
+        typer.echo("Provide --sha-prefix or --name", err=True)
+        raise typer.Exit(code=2)
+    count = _token_registry(registry).revoke(sha_prefix=sha_prefix, agent_name=name)
+    typer.echo(f"revoked {count} token(s)")
 
 
 async def _get_project_record(identifier: str) -> Project:

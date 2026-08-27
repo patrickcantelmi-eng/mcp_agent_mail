@@ -79,6 +79,10 @@ class Message(SQLModel, table=True):
     importance: str = Field(default="normal", max_length=16)
     ack_required: bool = Field(default=False)
     created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # True when the HTTP caller's credential was bound to the sender identity
+    # at send time (bd fba-restock-planner-xlhjj). Pre-auth rows default False.
+    # server_default keeps raw-SQL INSERTs (tests, maintenance scripts) valid.
+    sender_attested: bool = Field(default=False, sa_column_kwargs={"server_default": "0"})
     attachments: list[dict[str, Any]] = Field(
         default_factory=list,
         sa_column=Column(JSON, nullable=False, server_default="[]"),

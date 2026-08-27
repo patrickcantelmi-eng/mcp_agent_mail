@@ -37,6 +37,7 @@ from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
+from .authz import claim_agent_token, get_request_principal
 from .config import Settings, get_settings
 from .db import ensure_schema, get_engine, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -972,6 +973,7 @@ def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, A
         "importance": message.importance,
         "ack_required": message.ack_required,
         "created_ts": _iso(message.created_ts),
+        "sender_attested": bool(getattr(message, "sender_attested", False)),
         "attachments": message.attachments,
     }
     if include_body:
@@ -1001,6 +1003,7 @@ def _message_frontmatter(
         "importance": message.importance,
         "ack_required": message.ack_required,
         "created": _iso(message.created_ts),
+        "sender_attested": bool(getattr(message, "sender_attested", False)),
         "attachments": attachments,
     }
 
@@ -2312,6 +2315,17 @@ async def _create_message(
     if sender.id is None:
         raise ValueError("Sender must have an id before sending messages.")
     await ensure_schema()
+    # Server-side sender attestation (bd fba-restock-planner-xlhjj): true only
+    # when the HTTP credential of THIS request is bound to the sender identity.
+    # Shared/legacy tokens, localhost-dev callers, non-HTTP transports, and
+    # macro-internal sends under a differently-bound credential all stamp False.
+    principal = get_request_principal()
+    sender_attested = bool(
+        principal is not None
+        and principal.is_bound
+        and principal.agent_name is not None
+        and principal.agent_name.lower() == sender.name.lower()
+    )
     async with get_session() as session:
         message = Message(
             project_id=project.id,
@@ -2321,6 +2335,7 @@ async def _create_message(
             importance=importance,
             ack_required=ack_required,
             thread_id=thread_id,
+            sender_attested=sender_attested,
             attachments=list(attachments),
         )
         session.add(message)
@@ -3507,6 +3522,13 @@ def build_mcp_server() -> FastMCP:
         - Use the same `project_key` consistently across cooperating agents.
         """
         _validate_program_model(program, model)
+        # Fleet auth (bd fba-restock-planner-xlhjj): a credential already bound
+        # to an agent re-registers its own identity when name is omitted (seat
+        # continuity). A mismatching explicit name is refused by the HTTP
+        # middleware before reaching this tool.
+        principal = get_request_principal()
+        if principal is not None and principal.is_bound and not name:
+            name = principal.agent_name
         project = await _get_project_by_identifier(project_key)
         if settings.tools_log_enabled:
             try:
@@ -3524,6 +3546,24 @@ def build_mcp_server() -> FastMCP:
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
+        # Trust-on-first-use claim: an unclaimed per-agent token binds to the
+        # identity this registration resolves to; all later identity-asserting
+        # calls with that token are then enforced against the bound name.
+        if principal is not None and principal.kind == "unclaimed" and principal.token_sha256:
+            try:
+                claim_agent_token(
+                    Path(settings.http.agent_tokens_path).expanduser(),
+                    principal.token_sha256,
+                    agent.name,
+                )
+            except PermissionError as exc:
+                raise ToolExecutionError(
+                    "TOKEN_CLAIM_CONFLICT",
+                    f"Registration succeeded for '{agent.name}' but the presented agent token "
+                    f"could not be bound: {exc}",
+                    recoverable=False,
+                    data={"agent_name": agent.name},
+                ) from exc
         # Persist attachment policy if changed
         if getattr(agent, "attachments_policy", None) != ap:
             async with get_session() as session:
@@ -5702,7 +5742,7 @@ def build_mcp_server() -> FastMCP:
                     text(
                         """
                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name
+                               m.thread_id, m.sender_attested, a.name AS sender_name
                         FROM fts_messages
                         JOIN messages m ON fts_messages.rowid = m.id
                         JOIN agents a ON m.sender_id = a.id
@@ -5740,6 +5780,7 @@ def build_mcp_server() -> FastMCP:
                 "created_ts": _iso(row["created_ts"]),
                 "thread_id": row["thread_id"],
                 "from": row["sender_name"],
+                "sender_attested": bool(row["sender_attested"]),
             }
             for row in rows
         ]
@@ -6912,7 +6953,7 @@ def build_mcp_server() -> FastMCP:
                         text(
                             """
                             SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                                   m.thread_id, a.name AS sender_name, m.project_id
+                                   m.thread_id, m.sender_attested, a.name AS sender_name, m.project_id
                             FROM fts_messages
                             JOIN messages m ON fts_messages.rowid = m.id
                             JOIN agents a ON m.sender_id = a.id
@@ -6936,6 +6977,7 @@ def build_mcp_server() -> FastMCP:
                     "created_ts": _iso(row["created_ts"]),
                     "thread_id": row["thread_id"],
                     "from": row["sender_name"],
+                    "sender_attested": bool(row["sender_attested"]),
                     "project_id": row["project_id"],
                 }
                 for row in rows

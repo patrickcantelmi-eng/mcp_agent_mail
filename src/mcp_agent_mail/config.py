@@ -30,6 +30,13 @@ class HttpSettings:
     port: int
     path: str
     bearer_token: str | None
+    # Additional accepted shared bearer tokens (dual-accept rotation window)
+    bearer_tokens: list[str]
+    # Per-agent token registry (sha256(token) -> agent binding); see authz.py
+    agent_tokens_path: str
+    # "legacy": shared tokens behave as before; "strict": shared tokens are
+    # refused for identity-asserting tools (per-agent tokens required)
+    sender_binding: str
     # Basic per-IP limiter (legacy/simple)
     rate_limit_enabled: bool
     rate_limit_per_minute: int
@@ -206,6 +213,15 @@ def get_settings() -> Settings:
         port=_int(_decouple_config("HTTP_PORT", default="8765"), default=8765),
         path=_decouple_config("HTTP_PATH", default="/mcp/"),
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
+        bearer_tokens=_csv("HTTP_BEARER_TOKENS", default=""),
+        agent_tokens_path=_decouple_config(
+            "MAIL_AGENT_TOKENS_PATH", default="~/.config/mcp_agent_mail/agent_tokens.json"
+        ),
+        sender_binding=(
+            "strict"
+            if _decouple_config("MAIL_SENDER_BINDING", default="legacy").strip().lower() == "strict"
+            else "legacy"
+        ),
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
         rate_limit_backend=_decouple_config("HTTP_RATE_LIMIT_BACKEND", default="memory").lower(),
