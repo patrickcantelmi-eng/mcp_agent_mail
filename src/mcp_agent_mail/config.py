@@ -37,6 +37,11 @@ class HttpSettings:
     # "legacy": shared tokens behave as before; "strict": shared tokens are
     # refused for identity-asserting tools (per-agent tokens required)
     sender_binding: str
+    # Lifetime of an UNCLAIMED per-agent token (bd u5yak). After this many
+    # seconds a minted-but-never-claimed token stops authenticating (401) and
+    # can no longer claim an identity. <= 0 disables expiry. Default 1800s
+    # (30 min) — generous for a lane to boot and register, bounded exposure.
+    agent_unclaimed_token_ttl_seconds: int
     # Basic per-IP limiter (legacy/simple)
     rate_limit_enabled: bool
     rate_limit_per_minute: int
@@ -221,6 +226,9 @@ def get_settings() -> Settings:
             "strict"
             if _decouple_config("MAIL_SENDER_BINDING", default="legacy").strip().lower() == "strict"
             else "legacy"
+        ),
+        agent_unclaimed_token_ttl_seconds=_int(
+            _decouple_config("MAIL_AGENT_UNCLAIMED_TOKEN_TTL_SECONDS", default="1800"), default=1800
         ),
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),

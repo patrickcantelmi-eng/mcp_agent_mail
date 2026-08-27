@@ -13,7 +13,16 @@ def _rpc(method: str, params: dict) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_http_jwt_rbac_and_rate_limit(monkeypatch):
+async def test_http_jwt_rbac_and_rate_limit(monkeypatch, tmp_path):
+    # Hermeticity (bd u5yak): this test does not use isolated_env, so neutralize
+    # the auth keys the deployed .env would otherwise supply via decouple's
+    # fallback (a second shared token, a writer default role) and pin the
+    # registry to tmp — otherwise its reader-cannot-write assertion breaks.
+    monkeypatch.setenv("MAIL_AGENT_TOKENS_PATH", str(tmp_path / "agent_tokens.json"))
+    monkeypatch.setenv("HTTP_BEARER_TOKENS", "")
+    monkeypatch.setenv("HTTP_RBAC_DEFAULT_ROLE", "reader")
+    monkeypatch.setenv("MAIL_SENDER_BINDING", "legacy")
+    monkeypatch.setenv("MAIL_AGENT_UNCLAIMED_TOKEN_TTL_SECONDS", "0")
     # Configure bearer auth and RBAC
     monkeypatch.setenv("HTTP_BEARER_TOKEN", "token123")
     monkeypatch.setenv("HTTP_RBAC_ENABLED", "true")

@@ -262,6 +262,51 @@ async def test_unclaimed_token_claims_at_register_and_nothing_else(isolated_env,
 
 
 @pytest.mark.asyncio
+async def test_unclaimed_token_expires_after_ttl(isolated_env, tmp_path, monkeypatch):
+    # bd u5yak (ii): an unclaimed token minted long ago must stop authenticating
+    # and must not be claimable — bound tokens are unaffected.
+    settings = _auth_env(monkeypatch, tmp_path, MAIL_AGENT_UNCLAIMED_TOKEN_TTL_SECONDS="1800")
+    registry = TokenRegistry(tmp_path / "agent_tokens.json")
+    stale_token, stale_sha = registry.mint()          # unclaimed, will be aged out
+    fresh_token, _ = registry.mint()                   # unclaimed, recent
+    bound_token, _ = registry.mint(agent_name="BlueLake")
+
+    # Backdate the stale entry's created_ts past the TTL, directly in the file.
+    import json
+    from datetime import datetime, timedelta, timezone
+    reg_path = tmp_path / "agent_tokens.json"
+    data = json.loads(reg_path.read_text())
+    data["tokens"][stale_sha]["created_ts"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=3600)
+    ).isoformat()
+    reg_path.write_text(json.dumps(data))
+
+    app = _build(settings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _bootstrap_agents(client, settings, "fleet-primary-token", ["RedStone"])
+
+        # RED CONTROL: the aged-out unclaimed token no longer authenticates ...
+        r = await _call(client, settings, "health_check", {}, stale_token)
+        assert r.status_code == 401
+        # ... and cannot be used to claim an identity.
+        r = await _call(
+            client, settings, "register_agent",
+            {"project_key": PROJECT, "program": "test", "model": "test"}, stale_token,
+        )
+        assert r.status_code == 401
+
+        # MATCHED CONTROLS: a recent unclaimed token still claims, and a bound
+        # token is never expired by the unclaimed TTL.
+        r = await _call(
+            client, settings, "register_agent",
+            {"project_key": PROJECT, "program": "test", "model": "test"}, fresh_token,
+        )
+        assert r.status_code == 200, r.text
+        r = await _call(client, settings, "health_check", {}, bound_token)
+        assert r.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_strict_mode_refuses_shared_token_identity_tools(isolated_env, tmp_path, monkeypatch):
     settings = _auth_env(monkeypatch, tmp_path, MAIL_SENDER_BINDING="strict")
     registry = TokenRegistry(tmp_path / "agent_tokens.json")

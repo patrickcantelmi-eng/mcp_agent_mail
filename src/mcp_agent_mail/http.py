@@ -36,7 +36,13 @@ from .app import (
     refresh_project_sibling_suggestions,
     update_project_sibling_status,
 )
-from .authz import Principal, TokenRegistry, evaluate_identity_claims, hash_token
+from .authz import (
+    Principal,
+    TokenRegistry,
+    evaluate_identity_claims,
+    hash_token,
+    unclaimed_token_expired,
+)
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
@@ -202,6 +208,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._allow_localhost = bool(settings.http.allow_localhost_unauthenticated)
         self._strict = settings.http.sender_binding == "strict"
         self._jwt_enabled = bool(getattr(settings.http, "jwt_enabled", False))
+        self._unclaimed_ttl = int(getattr(settings.http, "agent_unclaimed_token_ttl_seconds", 0) or 0)
         self._registry = TokenRegistry(Path(settings.http.agent_tokens_path).expanduser())
 
     def _resolve_principal(self, request: Request) -> Principal | None:
@@ -214,6 +221,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 bound = entry.get("agent_name")
                 if isinstance(bound, str) and bound:
                     return Principal(kind="agent", agent_name=bound, token_sha256=sha)
+                # Unclaimed: refuse (401) once it has outlived the mint→claim
+                # window, so a minted-but-never-launched token cannot be used to
+                # claim an identity later (bd u5yak).
+                if unclaimed_token_expired(entry, self._unclaimed_ttl, datetime.now(timezone.utc)):
+                    return None
                 return Principal(kind="unclaimed", token_sha256=sha)
             if token in self._shared_tokens:
                 return Principal(kind="shared", token_sha256=sha)

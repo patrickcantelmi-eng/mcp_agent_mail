@@ -23,6 +23,19 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_AUTHOR_NAME", "test-agent")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("INLINE_IMAGE_MAX_BYTES", "128")
+    # Hermeticity against the deployed .env (bd u5yak/xlhjj). python-decouple
+    # falls back to the checkout's .env for any key not in os.environ, and once
+    # fleet auth is deployed that .env carries HTTP_BEARER_TOKEN / localhost=false
+    # / RBAC_DEFAULT_ROLE=writer / a registry path. A test that does not set every
+    # auth key would silently inherit live auth. Pin them all to inert defaults;
+    # tests that WANT auth override these after the fixture runs.
+    monkeypatch.setenv("MAIL_AGENT_TOKENS_PATH", str(tmp_path / "agent_tokens.json"))
+    monkeypatch.setenv("HTTP_BEARER_TOKEN", "")
+    monkeypatch.setenv("HTTP_BEARER_TOKENS", "")
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "true")
+    monkeypatch.setenv("HTTP_RBAC_DEFAULT_ROLE", "reader")
+    monkeypatch.setenv("MAIL_SENDER_BINDING", "legacy")
+    monkeypatch.setenv("MAIL_AGENT_UNCLAIMED_TOKEN_TTL_SECONDS", "0")
     clear_settings_cache()
     reset_database_state()
     # Clear repo cache before test to ensure isolation

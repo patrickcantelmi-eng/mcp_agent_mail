@@ -64,6 +64,35 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def unclaimed_token_expired(
+    entry: dict[str, Any], ttl_seconds: int, now: datetime
+) -> bool:
+    """True iff an UNCLAIMED registry entry is older than the TTL.
+
+    An unclaimed per-agent token is a bearer credential that can claim any
+    identity at its first register_agent (bd u5yak). Bounding its lifetime
+    limits the window in which a minted-but-never-launched token is useful to
+    anyone who reads it. ttl_seconds <= 0 disables expiry. A bound entry
+    (``agent_name`` set) never expires here — its lifetime is managed by
+    revocation. A missing/unparseable ``created_ts`` is treated as expired
+    (fail closed): a token we cannot age is not one we should keep honoring.
+    """
+    if ttl_seconds <= 0:
+        return False
+    if entry.get("agent_name"):
+        return False
+    created_raw = entry.get("created_ts")
+    if not isinstance(created_raw, str) or not created_raw:
+        return True
+    try:
+        created = datetime.fromisoformat(created_raw)
+    except ValueError:
+        return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (now - created).total_seconds() > ttl_seconds
+
+
 # Tool argument(s) that assert the CALLER's own identity. Arguments naming
 # other agents (whois.agent_name, send_message.to, request_contact.to_agent)
 # are deliberately absent — only self-assertions are bound to the credential.
